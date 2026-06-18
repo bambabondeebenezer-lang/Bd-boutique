@@ -1,86 +1,152 @@
-const Database = require('better-sqlite3');
-const crypto = require('crypto');
-const path = require('path');
+// ============================================================
+// BD BOUTIQUE — BASE DE DONNÉES SQLITE (module natif Node.js)
+// ============================================================
+// Utilise node:sqlite (disponible nativement depuis Node 22.5+, expérimental).
+// Aucune dépendance externe (pas de better-sqlite3, pas de npm install).
+// ============================================================
 
-const cheminDB = path.join(__dirname, 'bdboutique.db');
-const dbExistaitDeja = require('fs').existsSync(cheminDB);
+const { DatabaseSync } = require('node:sqlite');
+const path = require('node:path');
+const crypto = require('node:crypto');
 
-const db = new Database(cheminDB);
+const DB_PATH = path.join(__dirname, 'bdboutique.db');
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS administrateurs (
-    id TEXT PRIMARY KEY,
-    mot_de_passe_hash TEXT NOT NULL,
-    tentatives_echouees INTEGER DEFAULT 0,
-    bloque_jusqu_a INTEGER DEFAULT 0
-  );
-`);
+const db = new DatabaseSync(DB_PATH);
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS sessions (
-    token TEXT PRIMARY KEY,
-    admin_id TEXT NOT NULL,
-    cree_le INTEGER NOT NULL,
-    expire_le INTEGER NOT NULL
-  );
-`);
+// Active les clés étrangères (désactivées par défaut en SQLite)
+db.exec('PRAGMA foreign_keys = ON;');
+db.exec('PRAGMA journal_mode = WAL;');
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS parametres (
-    cle TEXT PRIMARY KEY,
-    valeur TEXT
-  );
-`);
+// ============================================================
+// CRÉATION DES TABLES
+// ============================================================
+function migrate() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS produits (
+      id TEXT PRIMARY KEY,
+      nom TEXT NOT NULL,
+      prix REAL NOT NULL,
+      categorie TEXT,
+      description TEXT,
+      photos TEXT NOT NULL DEFAULT '[]',
+      videos TEXT NOT NULL DEFAULT '[]',
+      actif INTEGER NOT NULL DEFAULT 1,
+      date_creation TEXT NOT NULL
+    );
+  `);
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS produits (
-    id TEXT PRIMARY KEY,
-    nom TEXT NOT NULL,
-    prix REAL NOT NULL,
-    description TEXT,
-    image TEXT,
-    categorie TEXT,
-    stock INTEGER DEFAULT 0,
-    cree_le INTEGER NOT NULL
-  );
-`);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS commandes (
+      id TEXT PRIMARY KEY,
+      numero_commande TEXT UNIQUE NOT NULL,
+      client_nom TEXT NOT NULL,
+      client_prenom TEXT NOT NULL,
+      client_telephone TEXT NOT NULL,
+      client_adresse TEXT NOT NULL,
+      client_note TEXT,
+      items TEXT NOT NULL DEFAULT '[]',
+      total REAL NOT NULL,
+      statut TEXT NOT NULL DEFAULT 'En attente',
+      date_creation TEXT NOT NULL
+    );
+  `);
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS commandes (
-    id TEXT PRIMARY KEY,
-    client_nom TEXT,
-    client_telephone TEXT,
-    client_adresse TEXT,
-    articles TEXT NOT NULL,
-    total REAL NOT NULL,
-    statut TEXT DEFAULT 'en_attente',
-    cree_le INTEGER NOT NULL
-  );
-`);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS paiements (
+      id TEXT PRIMARY KEY,
+      commande_id TEXT NOT NULL,
+      montant REAL NOT NULL,
+      statut TEXT NOT NULL DEFAULT 'En attente',
+      date_creation TEXT NOT NULL,
+      FOREIGN KEY (commande_id) REFERENCES commandes(id) ON DELETE CASCADE
+    );
+  `);
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS paiements (
-    id TEXT PRIMARY KEY,
-    commande_id TEXT NOT NULL,
-    methode TEXT DEFAULT 'wave',
-    statut TEXT DEFAULT 'en_attente',
-    montant REAL NOT NULL,
-    cree_le INTEGER NOT NULL,
-    FOREIGN KEY (commande_id) REFERENCES commandes(id)
-  );
-`);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS administrateurs (
+      id TEXT PRIMARY KEY,
+      identifiant TEXT UNIQUE NOT NULL,
+      mot_de_passe_hash TEXT NOT NULL,
+      sel TEXT NOT NULL,
+      derniere_connexion TEXT
+    );
+  `);
 
-if (!dbExistaitDeja) {
-  const motDePasseInitial = process.env.BD_ADMIN_INIT_PASS || 'ChangeMoiMaintenant!2024';
-  const sel = crypto.randomBytes(16).toString('hex');
-  const iterations = 100000;
-  const hash = crypto.pbkdf2Sync(motDePasseInitial, sel, iterations, 64, 'sha512').toString('hex');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      token TEXT PRIMARY KEY,
+      admin_id TEXT NOT NULL,
+      date_creation TEXT NOT NULL,
+      date_expiration TEXT NOT NULL,
+      FOREIGN KEY (admin_id) REFERENCES administrateurs(id) ON DELETE CASCADE
+    );
+  `);
 
-  db.prepare(
-    'INSERT INTO administrateurs (id, mot_de_passe_hash) VALUES (?, ?)'
-  ).run('admin', `${iterations}:${sel}:${hash}`);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tentatives_connexion (
+      identifiant TEXT PRIMARY KEY,
+      nb_echecs INTEGER NOT NULL DEFAULT 0,
+      bloque_jusqu_a TEXT
+    );
+  `);
 
-  console.log('✅ Base de données créée. Compte admin initialisé.');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS parametres (
+      cle TEXT PRIMARY KEY,
+      valeur TEXT
+    );
+  `);
+
+  seedAdminIfNeeded();
+  seedSettingsIfNeeded();
 }
 
-module.exports = db;
+// ============================================================
+// HACHAGE DE MOT DE PASSE (PBKDF2 — module natif crypto, équivalent bcrypt)
+// ============================================================
+function hashPassword(password, salt) {
+  return crypto.pbkdf2Sync(password, salt, 100000, 64, 'sha512').toString('hex');
+}
+
+function createAdmin(identifiant, motDePasse) {
+  const id = 'adm_' + crypto.randomUUID();
+  const sel = crypto.randomBytes(16).toString('hex');
+  const hash = hashPassword(motDePasse, sel);
+  const stmt = db.prepare(`
+    INSERT INTO administrateurs (id, identifiant, mot_de_passe_hash, sel, derniere_connexion)
+    VALUES (?, ?, ?, ?, NULL)
+  `);
+  stmt.run(id, identifiant, hash, sel);
+  return id;
+}
+
+function seedAdminIfNeeded() {
+  const existing = db.prepare('SELECT COUNT(*) as c FROM administrateurs').get();
+  if (existing.c === 0) {
+    // Mot de passe par défaut temporaire — DOIT être changé immédiatement.
+    // Voir CONFIGURATION.md pour la procédure de changement de mot de passe.
+    const defaultPass = process.env.BD_ADMIN_INIT_PASS || 'ChangeMoiMaintenant!2024';
+    createAdmin('admin', defaultPass);
+    console.log('⚠️  Compte admin créé avec mot de passe temporaire. Voir CONFIGURATION.md pour le changer immédiatement.');
+  }
+}
+
+function seedSettingsIfNeeded() {
+  const defaults = {
+    whatsapp: '2250160556510',
+    wave: '0769087461',
+    storeName: 'BD Boutique',
+    slogan: "Découvrez notre sélection de produits de qualité. Commandez facilement, payez via Wave et recevez votre livraison partout en Côte d'Ivoire.",
+    contactPhoneDisplay: '+225 01 60 55 65 10',
+    contactEmail: '',
+    contactAddress: "Côte d'Ivoire",
+  };
+  const insert = db.prepare(`INSERT OR IGNORE INTO parametres (cle, valeur) VALUES (?, ?)`);
+  for (const [k, v] of Object.entries(defaults)) {
+    insert.run(k, v);
+  }
+}
+
+migrate();
+
+module.exports = { db, hashPassword };
