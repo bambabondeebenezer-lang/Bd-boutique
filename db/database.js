@@ -1,11 +1,11 @@
-const { DatabaseSync } = require('node:sqlite');
+const Database = require('better-sqlite3');
 const crypto = require('crypto');
 const path = require('path');
 
 const cheminDB = path.join(__dirname, 'bdboutique.db');
 const dbExistaitDeja = require('fs').existsSync(cheminDB);
 
-const db = new DatabaseSync(cheminDB);
+const db = new Database(cheminDB);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS administrateurs (
