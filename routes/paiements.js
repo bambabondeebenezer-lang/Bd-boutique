@@ -1,29 +1,38 @@
 // ============================================================
-// API PAIEMENTS — GET /api/paiements
+// API PARAMÈTRES — GET /api/parametres, PUT /api/parametres (admin)
 // ============================================================
-// Rappel : le paiement réel est négocié manuellement sur WhatsApp.
-// Ces enregistrements servent uniquement de suivi administratif
-// (le statut "Payé" est positionné quand l'admin marque la commande
-// comme Confirmée ou Livrée).
 
 const { db } = require('../db/database');
+const { nettoyerTexte } = require('../utils/http');
 
-function ligneVersPaiement(ligne) {
-  const commande = db.prepare('SELECT numero_commande FROM commandes WHERE id = ?').get(ligne.commande_id);
-  return {
-    id: ligne.id,
-    orderId: ligne.commande_id,
-    orderNumber: commande ? commande.numero_commande : null,
-    amount: ligne.montant,
-    status: ligne.statut,
-    date: ligne.date_creation,
-  };
+function listerParametres(req, res, repondreJSON) {
+  const lignes = db.prepare('SELECT * FROM parametres').all();
+  const obj = {};
+  for (const l of lignes) obj[l.cle] = l.valeur;
+  repondreJSON(res, 200, obj);
 }
 
-// GET /api/paiements — liste (admin uniquement)
-function listerPaiements(req, res, repondreJSON) {
-  const lignes = db.prepare('SELECT * FROM paiements ORDER BY date_creation DESC').all();
-  repondreJSON(res, 200, lignes.map(ligneVersPaiement));
+function modifierParametres(req, res, repondreJSON, corps) {
+  const cleAutorisees = [
+    'whatsapp', 'wave', 'storeName', 'slogan',
+    'contactPhoneDisplay', 'contactEmail', 'contactAddress',
+  ];
+  const upsert = db.prepare(`
+    INSERT INTO parametres (cle, valeur) VALUES (?, ?)
+    ON CONFLICT(cle) DO UPDATE SET valeur = ?
+  `);
+
+  for (const cle of cleAutorisees) {
+    if (corps[cle] !== undefined) {
+      const valeur = nettoyerTexte(corps[cle]);
+      upsert.run(cle, valeur, valeur);
+    }
+  }
+
+  const lignes = db.prepare('SELECT * FROM parametres').all();
+  const obj = {};
+  for (const l of lignes) obj[l.cle] = l.valeur;
+  repondreJSON(res, 200, obj);
 }
 
-module.exports = { listerPaiements };
+module.exports = { listerParametres, modifierParametres };
