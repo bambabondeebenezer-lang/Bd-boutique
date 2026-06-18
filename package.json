@@ -1,0 +1,14 @@
+{
+  "name": "bd-boutique-backend",
+  "version": "1.0.0",
+  "description": "BD Boutique — backend Node.js natif (zéro dépendance), API REST + SQLite",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
