@@ -1,33 +1,29 @@
-const limites = new Map();
+// ============================================================
+// LIMITEUR DE DÉBIT (anti-spam) — en mémoire, par IP
+// ============================================================
+// Simple fenêtre glissante. Suffisant pour une petite boutique ;
+// si le trafic grandit beaucoup, migrer vers une solution dédiée (ex. Redis).
 
-function rateLimit({ fenetre = 60000, max = 10 } = {}) {
-  return function (req, res, next) {
-    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'inconnu';
+const fenetres = new Map(); // ip -> [timestamps]
+
+function limiterDebit({ maxRequetes = 20, fenetreMs = 60_000 } = {}) {
+  return function (ip) {
     const maintenant = Date.now();
-    const cle = `${ip}:${req.url}`;
-
-    if (!limites.has(cle)) {
-      limites.set(cle, { compte: 1, debut: maintenant });
-      return next();
-    }
-
-    const entree = limites.get(cle);
-
-    if (maintenant - entree.debut > fenetre) {
-      limites.set(cle, { compte: 1, debut: maintenant });
-      return next();
-    }
-
-    if (entree.compte >= max) {
-      res.writeHead(429, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify({
-        erreur: 'Trop de tentatives. Réessayez dans quelques minutes.'
-      }));
-    }
-
-    entree.compte++;
-    return next();
+    const historique = (fenetres.get(ip) || []).filter(t => maintenant - t < fenetreMs);
+    historique.push(maintenant);
+    fenetres.set(ip, historique);
+    return historique.length <= maxRequetes;
   };
 }
 
-module.exports = { rateLimit };
+// Nettoyage périodique pour éviter la fuite mémoire sur le long terme
+setInterval(() => {
+  const maintenant = Date.now();
+  for (const [ip, historique] of fenetres.entries()) {
+    const filtre = historique.filter(t => maintenant - t < 5 * 60_000);
+    if (filtre.length === 0) fenetres.delete(ip);
+    else fenetres.set(ip, filtre);
+  }
+}, 5 * 60_000).unref();
+
+module.exports = { limiterDebit };
